@@ -455,7 +455,7 @@ await Actor.main(async () => {
     console.log('🚀 Starting CarGurus Stealth Scraper with UI Filters...');
 
     // Open persistent Key-Value Store (survives between runs)
-    const kv = await Actor.openKeyValueStore('scraper-state');
+    const kv = await Actor.openKeyValueStore('scraper-state-discounted');
 
     // Get or initialize page state with daily reset
     let startPage = currentPage;
@@ -800,9 +800,7 @@ await Actor.main(async () => {
 
                 // Save car data
                 if (carData.vin || carData.title) {
-                    const sourceScraper = pageToScrape >= 1 && pageToScrape <= 6
-                        ? 'Best 3-pager'
-                        : 'Best';
+                    const sourceScraper = 'Recently Discounted';
 
                     const dataToSave = {
                         type: 'car_listing',
