@@ -180,11 +180,30 @@ async function setSearchRadius(page, searchRadius) {
 // state from a fresh locator. Only invoked AFTER the normal path has thrown, so
 // the happy path is left exactly as it was.
 // ============================================================
-async function clickCheckboxDetachProof(page, selector, name, maxAttempts = 6) {
+async function clickCheckboxDetachProof(page, selectorOrCandidates, name, maxAttempts = 6) {
+    const candidates = Array.isArray(selectorOrCandidates) ? selectorOrCandidates : [selectorOrCandidates];
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            const cb = page.locator(selector).first();
-            await cb.waitFor({ state: 'attached', timeout: 15000 });
+            let cb = null;
+            let activeSelector = null;
+
+            for (const cand of candidates) {
+                const hit = await page.locator(cand).first()
+                    .waitFor({ state: 'attached', timeout: candidates.length > 1 ? 3000 : 15000 })
+                    .then(() => true).catch(() => false);
+                if (hit) {
+                    cb = page.locator(cand).first();
+                    activeSelector = cand;
+                    break;
+                }
+            }
+
+            if (!cb) {
+                console.log(`  ⚠️ [detach-proof] ${name} attempt ${attempt}/${maxAttempts} threw: None of the selectors matched`);
+                await page.waitForTimeout(1000);
+                continue;
+            }
 
             const before = await cb.getAttribute('aria-checked').catch(() => null);
             if (before === 'true') {
@@ -198,7 +217,7 @@ async function clickCheckboxDetachProof(page, selector, name, maxAttempts = 6) {
             await page.waitForTimeout(600);
 
             // Re-read from a FRESH locator — the clicked handle may be detached.
-            const after = await page.locator(selector).first()
+            const after = await page.locator(activeSelector).first()
                 .getAttribute('aria-checked').catch(() => null);
             if (after === 'true') {
                 console.log(`  ✅ [detach-proof] ${name} selected (attempt ${attempt}/${maxAttempts})`);
@@ -206,14 +225,11 @@ async function clickCheckboxDetachProof(page, selector, name, maxAttempts = 6) {
             }
 
             console.log(`  ⚠️ [detach-proof] ${name} still ${after} after attempt ${attempt}/${maxAttempts} — retrying`);
-        } catch (err) {
-            console.log(`  ⚠️ [detach-proof] ${name} attempt ${attempt}/${maxAttempts} threw: ${err.message} — re-locating`);
+        } catch (error) {
+            console.log(`  ⚠️ [detach-proof] ${name} attempt ${attempt}/${maxAttempts} threw: ${error.message} — re-locating`);
         }
-
-        await page.waitForTimeout(700);
+        await page.waitForTimeout(1000);
     }
-
-    console.log(`  ❌ [detach-proof] ${name} could not be selected after ${maxAttempts} attempts`);
     return false;
 }
 
@@ -234,12 +250,12 @@ async function applyBodyTypeFilter(page, bodyTypes) {
                 : null;
 
             const candidates = [
-                `button[role="checkbox"][aria-label*="${labelText}"]`,
                 ...(groupId ? [
                     `[data-testid="checkbox-FILTER.BODY_TYPE_GROUP.${groupId}"]`,
                     `button[role="checkbox"][id="FILTER.BODY_TYPE_GROUP.${groupId}"]`,
                     `[data-testid*="BODY_TYPE_GROUP.${groupId}"]`,
                 ] : []),
+                `button[role="checkbox"][aria-label*="${labelText}"]`,
                 `button[role="checkbox"][aria-label*="${labelText.split(' / ')[0]}"]`,
             ];
 
@@ -312,7 +328,7 @@ async function applyBodyTypeFilter(page, bodyTypes) {
                     throw new Error(`${groupName}: ${labelText} checkbox is not present in the panel (no known selector matched)`);
                 }
                 console.log(`  ⚠️ ${groupName}: ${labelText} primary click failed (${primaryError.message}) — engaging detach-proof fallback`);
-                const ok = await clickCheckboxDetachProof(page, selector, `${groupName}: ${labelText}`);
+                const ok = await clickCheckboxDetachProof(page, candidates, `${groupName}: ${labelText}`);
                 if (!ok) {
                     throw new Error(`${groupName}: ${labelText} could not be selected (primary + fallback both failed)`);
                 }
@@ -409,8 +425,7 @@ async function clickMakeCheckbox(page, make) {
     // Only runs after the normal path is already exhausted, so it can't affect
     // a good run.
     console.log(`  ⚠️ ${make}: all selectors failed — engaging detach-proof fallback`);
-    const idSelector = `button[role="checkbox"][id="FILTER.MAKE_MODEL.${normalizedMake}"]`;
-    if (await clickCheckboxDetachProof(page, idSelector, make)) {
+    if (await clickCheckboxDetachProof(page, selectors, make)) {
         return true;
     }
 
@@ -471,7 +486,7 @@ async function applyPriceFilter(page) {
         await ensureAccordionOpen(page, '#Price-accordion-trigger', '#Price-accordion-content', 'Price');
 
         // Find the MINIMUM slider specifically (not maximum)
-        const minSlider = page.locator('[role="slider"][aria-label="Minimum"]');
+        const minSlider = page.locator('#Price-accordion-content [role="slider"][aria-label="Minimum"]').first();
         await minSlider.waitFor({ state: 'visible', timeout: 90000 });
 
         // Click on the minimum slider to focus it
@@ -664,7 +679,7 @@ async function applyPriceDropsFilter(page) {
             // Reuse the detach-proof clicker before giving up — the filter panel
             // re-renders live result counts and can detach the element mid-click.
             console.log(`  ⚠️ Price drops still ${checkedAfter} after click — engaging detach-proof fallback`);
-            if (!await clickCheckboxDetachProof(page, usedSelector, 'Price drops')) {
+            if (!await clickCheckboxDetachProof(page, candidates, 'Price drops')) {
                 throw new Error(`Clicked Price drops, but aria-checked is ${checkedAfter}`);
             }
         }
@@ -836,7 +851,7 @@ async function expandFilterSections(page) {
     // indices we are iterating over.
     let opened = 0;
     for (let pass = 1; pass <= 3; pass++) {
-        const triggers = panel.locator('button[aria-expanded="false"], [role="button"][aria-expanded="false"]');
+        const triggers = panel.locator('button[aria-expanded="false"]:not([role="checkbox"]):not([role="switch"]):not([type="checkbox"]), [role="button"][aria-expanded="false"]:not([role="checkbox"]):not([role="switch"]):not([type="checkbox"])');
         const count = await triggers.count().catch(() => 0);
         if (count === 0) break;
 
@@ -1254,7 +1269,20 @@ await Actor.main(async () => {
                         console.log(`  ✅ Clicked Next button (${i + 1}/${clicksNeeded})`);
 
                         // Wait for new page to load
-                        await page.waitForTimeout(4000);
+                        const expectedAfterClick = currentPageNumber + i + 1;
+                        let reached = false;
+                        for (let w = 0; w < 20; w++) { // up to 20s wait
+                            await page.waitForTimeout(1000);
+                            const p = await readCurrentPageFromDom(page);
+                            if (p === expectedAfterClick) {
+                                reached = true;
+                                break;
+                            }
+                        }
+                        if (!reached) {
+                            console.log(`  ⚠️ Pager did not update to ${expectedAfterClick} after click. Page loading may be slow or reached end of results.`);
+                            await page.waitForTimeout(2000); // Give it one more small wait
+                        }
                     } catch (error) {
                         console.log(`  ⚠️ Next button click failed: ${error.message}`);
 
@@ -1417,30 +1445,96 @@ await Actor.main(async () => {
         for (let listingIndex = 0; listingIndex < listingsToProcess; listingIndex++) {
             console.log(`\n🔍 Processing listing ${listingIndex + 1}/${listingsToProcess}...`);
 
-            let listingPage = null;
             try {
-                // Get listing URL from main search tab (which stays open the whole time)
-                const listingHref = await page.evaluate(({ index, sel }) => {
+                // Extract directly from the SRP list item without opening a new tab
+                const srpData = await page.evaluate(({ index, sel }) => {
                     const links = document.querySelectorAll(sel);
-                    return links[index] ? links[index].href : null;
+                    const link = links[index];
+                    if (!link) return null;
+                    
+                    const element = link.closest('[data-testid="srp-listing-tile"]') || link.closest('div[class*="blade"]') || link.parentElement.parentElement;
+                    const data = {};
+                    
+                    const dl = element.querySelector('dl');
+                    if (dl) {
+                        const dts = dl.querySelectorAll('dt');
+                        const dds = dl.querySelectorAll('dd');
+                        for (let i = 0; i < dts.length; i++) {
+                            const key = dts[i].textContent.trim().replace(':', '').toLowerCase();
+                            const value = dds[i] ? dds[i].textContent.trim() : null;
+                            if (key === 'vin') data.vin = value;
+                            if (key === 'year') data.year = value;
+                            if (key === 'make') data.make = value;
+                            if (key === 'model') data.model = value;
+                            if (key === 'body type') data.bodyType = value;
+                            if (key === 'fuel type') data.fuelType = value;
+                            if (key === 'mileage') data.mileage = value;
+                            if (key === 'doors') data.doors = value;
+                            if (key === 'drivetrain') data.drivetrain = value;
+                            if (key === 'engine') data.engine = value;
+                            if (key === 'exterior colour' || key === 'exterior color') data.exteriorColor = value;
+                            if (key === 'interior colour' || key === 'interior color') data.interiorColor = value;
+                            if (key === 'transmission') data.transmission = value;
+                        }
+                    }
+
+                    const titleEl = element.querySelector('[data-testid="srp-listing-blade-title"]');
+                    if (titleEl) data.title = titleEl.textContent.trim();
+
+                    const priceEl = element.querySelector('[data-testid="srp-tile-price"], [data-cg-ft="srp-listing-blade-price"]');
+                    if (priceEl) {
+                        data.priceString = priceEl.textContent.trim();
+                        data.price = parseInt(data.priceString.replace(/[$,]/g, ''));
+                    }
+
+                    const trimEl = element.querySelector('[data-cg-ft="vehicle"]');
+                    if (trimEl) data.trim = trimEl.textContent.trim();
+
+                    const locationEl = element.querySelector('[data-testid="LocationSection-firstLine"] span, [data-testid="srp-tile-location-section"] span');
+                    if (locationEl) data.dealerCity = locationEl.textContent.trim();
+
+                    const sponsoredEl = element.querySelector('[data-testid="sponsored-text"] em');
+                    if (sponsoredEl) {
+                        data.dealerName = sponsoredEl.textContent.trim();
+                    } else {
+                        const logoImg = element.querySelector('[class*="dealerLogo"]');
+                        if (logoImg && logoImg.alt) {
+                            data.dealerName = logoImg.alt.trim();
+                        }
+                    }
+
+                    const dealRatingEl = element.querySelector('[data-testid="srp-tile-deal-rating"] section span:not(:empty)');
+                    if (dealRatingEl) data.dealRating = dealRatingEl.textContent.trim();
+
+                    data.url = link.href;
+                    
+                    const mileageEl = element.querySelector('[data-testid="srp-tile-mileage"]');
+                    if (mileageEl && !data.mileage) data.mileage = mileageEl.textContent.trim();
+                    
+                    data.source = 'srp_dom';
+
+                    return data;
                 }, { index: listingIndex, sel: listingSelector });
 
-                if (!listingHref) {
+                if (!srpData) {
                     console.log(`  ⚠️ Listing ${listingIndex + 1} not found in DOM - skipping`);
                     continue;
                 }
 
-                // Open listing in a new tab — search results tab stays untouched
-                listingPage = await context.newPage();
-                await listingPage.goto(listingHref, { waitUntil: 'domcontentloaded', timeout: 90000 });
-                await listingPage.waitForSelector('h1[data-cg-ft="vdp-listing-title"]', { timeout: 15000 });
-                console.log(`  ✅ Detail page loaded`);
+                let carData = srpData;
+                let listingPage = null;
 
-                // Small delay to let detail view fully render
-                await listingPage.waitForTimeout(2000);
+                // Fallback to detail page only if VIN is missing from SRP
+                if (!carData.vin) {
+                    console.log(`  ⚠️ VIN missing from SRP, falling back to Detail Page...`);
+                    listingPage = await context.newPage();
+                    await listingPage.goto(carData.url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+                    
+                    // Don't wait strictly for the h1 selector since it might be missing
+                    await listingPage.waitForTimeout(3000); 
+                    console.log(`  ✅ Detail page loaded`);
 
-                // Extract data from the listing tab
-                const carData = await listingPage.evaluate(() => {
+                    const vdpData = await listingPage.evaluate(() => {
                     const preflight = window.__PREFLIGHT__ || {};
                     const listing = preflight.listing || {};
 
@@ -1524,10 +1618,14 @@ await Actor.main(async () => {
                     };
                 });
 
-                // Close the listing tab — back to search results automatically
                 await listingPage.close();
                 listingPage = null;
                 console.log(`  ✅ Listing tab closed`);
+                
+                carData = { ...srpData, ...vdpData, source: 'vdp_dom' };
+                } else {
+                    console.log(`  ✅ Extracted fully from SRP (no detail page needed)`);
+                }
 
                 // Add page metadata
                 carData.pageNumber = pageToScrape;
@@ -1545,7 +1643,8 @@ await Actor.main(async () => {
 
                 // Save car data
                 if (carData.vin || carData.title) {
-                    const sourceScraper = 'Recently Discounted';
+                    const baseScraper = 'Recently Discounted';
+                    const sourceScraper = `${baseScraper} - Page ${pageToScrape}`;
 
                     const dataToSave = {
                         type: 'car_listing',
